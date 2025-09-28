@@ -3,7 +3,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { selectCurrentInterview, type Candidate, type Answer } from '@/store';
 import { generateInterviewQuestions, evaluateAnswer, handleInterviewFlow } from '@/services/gemini';
-import { MessageCircle, CheckCircle, ArrowRight, Loader2, Upload, Bot, User, Mic, MicOff } from 'lucide-react';
+import { MessageCircle, CheckCircle, ArrowRight, Loader2, Upload, Bot, User, Mic, MicOff, SkipForward } from 'lucide-react';
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card } from "@/components/ui/card";
@@ -12,6 +12,7 @@ import SentimentAnalysis from './SentimentAnalysis';
 import InterviewAnalytics from './InterviewAnalytics';
 import LanguageSelector from './LanguageSelector';
 import InterviewTemplateSelector from './InterviewTemplateSelector';
+import { Dialog } from './ui/dialog';
 
 // Type declarations for speech recognition
 interface SpeechRecognitionEvent extends Event {
@@ -62,6 +63,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
     const [currentAnswer, setCurrentAnswer] = useState('');
     const [isAnalyzing, setIsAnalyzing] = useState(false);
     const [isListening, setIsListening] = useState(false);
+    const [showCancelDialog, setShowCancelDialog] = useState(false);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -139,6 +141,112 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         }
     }, [isVoiceSupported]);
 
+    // Get localized text based on selected language
+    const getLocalizedText = useCallback((key: string): string => {
+        const translations = {
+            'question_prefix': {
+                'en': '📝 Question',
+                'es': '📝 Pregunta',
+                'fr': '📝 Question',
+                'de': '📝 Frage',
+                'it': '📝 Domanda',
+                'pt': '📝 Pergunta',
+                'ru': '📝 Вопрос',
+                'ja': '📝 質問',
+                'ko': '📝 질문',
+                'zh': '📝 问题'
+            },
+            'difficulty': {
+                'en': { 'easy': 'EASY', 'medium': 'MEDIUM', 'hard': 'HARD' },
+                'es': { 'easy': 'FÁCIL', 'medium': 'MEDIO', 'hard': 'DIFÍCIL' },
+                'fr': { 'easy': 'FACILE', 'medium': 'MOYEN', 'hard': 'DIFFICILE' },
+                'de': { 'easy': 'EINFACH', 'medium': 'MITTEL', 'hard': 'SCHWER' },
+                'it': { 'easy': 'FACILE', 'medium': 'MEDIO', 'hard': 'DIFFICILE' },
+                'pt': { 'easy': 'FÁCIL', 'medium': 'MÉDIO', 'hard': 'DIFÍCIL' },
+                'ru': { 'easy': 'ЛЕГКО', 'medium': 'СРЕДНЕ', 'hard': 'СЛОЖНО' },
+                'ja': { 'easy': '簡単', 'medium': '普通', 'hard': '難しい' },
+                'ko': { 'easy': '쉬움', 'medium': '보통', 'hard': '어려움' },
+                'zh': { 'easy': '简单', 'medium': '中等', 'hard': '困难' }
+            },
+            'current_question': {
+                'en': 'Current Question',
+                'es': 'Pregunta Actual',
+                'fr': 'Question Actuelle',
+                'de': 'Aktuelle Frage',
+                'it': 'Domanda Attuale',
+                'pt': 'Pergunta Atual',
+                'ru': 'Текущий Вопрос',
+                'ja': '現在の質問',
+                'ko': '현재 질문',
+                'zh': '当前问题'
+            },
+            'cancel_interview_title': {
+                'en': 'Cancel Interview',
+                'es': 'Cancelar Entrevista',
+                'fr': 'Annuler l\'Entretien',
+                'de': 'Interview Abbrechen',
+                'it': 'Annulla Colloquio',
+                'pt': 'Cancelar Entrevista',
+                'ru': 'Отменить Интервью',
+                'ja': '面接をキャンセル',
+                'ko': '면접 취소',
+                'zh': '取消面试'
+            },
+            'cancel_interview_message': {
+                'en': 'Are you sure you want to cancel the current interview? Progress will be lost.',
+                'es': '¿Estás seguro de que quieres cancelar la entrevista actual? Se perderá el progreso.',
+                'fr': 'Êtes-vous sûr de vouloir annuler l\'entretien en cours ? Les progrès seront perdus.',
+                'de': 'Sind Sie sicher, dass Sie das aktuelle Interview abbrechen möchten? Der Fortschritt geht verloren.',
+                'it': 'Sei sicuro di voler annullare il colloquio attuale? I progressi andranno persi.',
+                'pt': 'Tem certeza de que deseja cancelar a entrevista atual? O progresso será perdido.',
+                'ru': 'Вы уверены, что хотите отменить текущее интервью? Прогресс будет потерян.',
+                'ja': '現在の面接をキャンセルしてもよろしいですか？進捗が失われます。',
+                'ko': '현재 면접을 취소하시겠습니까? 진행 상황이 손실됩니다.',
+                'zh': '您确定要取消当前面试吗？进度将会丢失。'
+            },
+            'ok': {
+                'en': 'OK',
+                'es': 'Aceptar',
+                'fr': 'OK',
+                'de': 'OK',
+                'it': 'OK',
+                'pt': 'OK',
+                'ru': 'ОК',
+                'ja': 'OK',
+                'ko': '확인',
+                'zh': '确定'
+            },
+            'cancel': {
+                'en': 'Cancel',
+                'es': 'Cancelar',
+                'fr': 'Annuler',
+                'de': 'Abbrechen',
+                'it': 'Annulla',
+                'pt': 'Cancelar',
+                'ru': 'Отмена',
+                'ja': 'キャンセル',
+                'ko': '취소',
+                'zh': '取消'
+            }
+        } as const;
+
+        const keys = key.split('.');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        let value: any = translations;
+        for (const k of keys) {
+            value = value[k];
+            if (!value) break;
+        }
+
+        if (typeof value === 'object' && value && value[selectedLanguage]) {
+            return value[selectedLanguage];
+        } else if (typeof value === 'string') {
+            return value || key;
+        }
+
+        return key;
+    }, [selectedLanguage]);
+
     const startListening = () => {
         if (recognitionRef.current && !isListening) {
             try {
@@ -189,7 +297,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         addMessage('assistant', 'Generating personalized interview questions...', true);
 
         try {
-            const interviewData = await generateInterviewQuestions();
+            const interviewData = await generateInterviewQuestions(selectedLanguage);
             const questions = interviewData.questions;
 
             dispatch({
@@ -198,7 +306,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
             });
 
             updateLastMessage(`Perfect! I've generated ${questions.length} questions for your interview. You'll have ${questions[0].seconds} seconds to answer each question. Here's your first question:`, false);
-            addMessage('assistant', `Question 1: ${questions[0].prompt}`);
+            addMessage('assistant', `${getLocalizedText('question_prefix')} 1: ${questions[0].prompt}`);
 
             dispatch({ type: 'interview/timer_tick', payload: questions[0].seconds });
         } catch (error) {
@@ -207,7 +315,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         } finally {
             setIsLoading(false);
         }
-    }, [interview.candidate, dispatch, addMessage, updateLastMessage]);
+    }, [interview.candidate, dispatch, addMessage, updateLastMessage, selectedLanguage, getLocalizedText]);
 
     const handleGeminiFlow = useCallback(async (userMessage: string) => {
         if (!userMessage.trim()) return;
@@ -222,7 +330,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
             const conversationHistory = currentMessages.map(m => `${m.role}: ${m.text}`).slice(-10);
 
             // Process the flow asynchronously
-            const result = await handleInterviewFlow(userMessage, interview.candidate, conversationHistory);
+            const result = await handleInterviewFlow(userMessage, interview.candidate, conversationHistory, selectedLanguage);
 
             updateLastMessage(result.response, false);
 
@@ -253,7 +361,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         } finally {
             setIsLoading(false);
         }
-    }, [interview.candidate, dispatch, addMessage, updateLastMessage, startInterview, messages]);
+    }, [interview.candidate, dispatch, addMessage, updateLastMessage, startInterview, messages, selectedLanguage]);
 
     const initializeChat = useCallback(() => {
         if (interview.status === 'collecting_info' && messages.length === 0 && !initializedRef.current) {
@@ -272,9 +380,10 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
     }, [initializeChat]);
 
     const cancelInterview = useCallback(() => {
-        const confirmed = window.confirm('Are you sure you want to cancel the current interview? Progress will be lost.');
-        if (!confirmed) return;
+        setShowCancelDialog(true);
+    }, []);
 
+    const handleConfirmCancel = useCallback(() => {
         if (timerRef.current) {
             clearInterval(timerRef.current);
             timerRef.current = null;
@@ -284,10 +393,16 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         setMessages([]);
         setIsLoading(false);
         initializedRef.current = false;
+        setShowCancelDialog(false);
 
         dispatch({ type: 'interview/reset' });
         onCancel?.();
     }, [dispatch, onCancel]);
+
+    const handleCancelCancel = useCallback(() => {
+        setShowCancelDialog(false);
+    }, []);
+
 
 
     const restartInterview = useCallback(async () => {
@@ -380,6 +495,39 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         onStartInterview?.(); // Trigger callback to update parent
     }, [interview.answers, dispatch, onStartInterview, addMessage]);
 
+    const handleSkipQuestion = useCallback(async () => {
+        if (interview.currentIndex >= interview.questions.length) return;
+
+        const currentQuestion = interview.questions[interview.currentIndex];
+        const skippedAnswer = 'Question skipped - no answer provided';
+
+        dispatch({
+            type: 'interview/submit_answer',
+            payload: {
+                questionId: currentQuestion.id,
+                content: skippedAnswer,
+                autoSubmitted: false
+            }
+        });
+
+        setInput('');
+
+        // Evaluate the skipped answer with a score of 0
+        const evaluation = await evaluateAnswer(currentQuestion, skippedAnswer, selectedLanguage);
+
+        addMessage('user', '⏭️ Skipped this question');
+        addMessage('assistant', `📊 Score: ${evaluation.score}/10\n${getShortFeedback(evaluation.feedback)}`);
+
+        // Move to next question or complete interview
+        if (interview.currentIndex + 1 < interview.questions.length) {
+            const nextQuestion = interview.questions[interview.currentIndex + 1];
+            addMessage('assistant', `\n${getLocalizedText('question_prefix')} ${interview.currentIndex + 2}/${interview.questions.length} (${getLocalizedText(`difficulty.${nextQuestion.difficulty}`)}) - ${nextQuestion.seconds}s:\n${nextQuestion.prompt}`);
+            dispatch({ type: 'interview/timer_tick', payload: nextQuestion.seconds });
+        } else {
+            completeInterview();
+        }
+    }, [interview.currentIndex, interview.questions, dispatch, addMessage, completeInterview, getShortFeedback, selectedLanguage, getLocalizedText]);
+
     const handleAutoSubmit = useCallback(async () => {
         if (interview.currentIndex >= interview.questions.length) return;
 
@@ -398,7 +546,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         setInput('');
 
         // Evaluate the answer
-        const evaluation = await evaluateAnswer(currentQuestion, answer);
+        const evaluation = await evaluateAnswer(currentQuestion, answer, selectedLanguage);
 
         addMessage('assistant', `⏰ Time's up! Your answer: "${answer}"`);
         addMessage('assistant', `📊 Score: ${evaluation.score}/10\n${getShortFeedback(evaluation.feedback)}`);
@@ -406,12 +554,12 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         // Move to next question or complete interview
         if (interview.currentIndex + 1 < interview.questions.length) {
             const nextQuestion = interview.questions[interview.currentIndex + 1];
-            addMessage('assistant', `\n📝 Question ${interview.currentIndex + 2}/${interview.questions.length} (${nextQuestion.difficulty.toUpperCase()}) - ${nextQuestion.seconds}s:\n${nextQuestion.prompt}`);
+            addMessage('assistant', `\n${getLocalizedText('question_prefix')} ${interview.currentIndex + 2}/${interview.questions.length} (${getLocalizedText(`difficulty.${nextQuestion.difficulty}`)}) - ${nextQuestion.seconds}s:\n${nextQuestion.prompt}`);
             dispatch({ type: 'interview/timer_tick', payload: nextQuestion.seconds });
         } else {
             completeInterview();
         }
-    }, [interview.currentIndex, interview.questions, input, dispatch, addMessage, completeInterview, getShortFeedback]);
+    }, [interview.currentIndex, interview.questions, input, dispatch, addMessage, completeInterview, getShortFeedback, selectedLanguage, getLocalizedText]);
 
     // Remove the old checkMissingInfo logic - now handled by Gemini
 
@@ -464,7 +612,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
             addMessage('assistant', 'Evaluating your answer...', true);
 
             try {
-                const evaluation = await evaluateAnswer(currentQuestion, userInput);
+                const evaluation = await evaluateAnswer(currentQuestion, userInput, selectedLanguage);
 
                 dispatch({
                     type: 'interview/submit_answer',
@@ -477,7 +625,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
                 if (interview.currentIndex + 1 < interview.questions.length) {
                     const nextQuestion = interview.questions[interview.currentIndex + 1];
                     setTimeout(() => {
-                        addMessage('assistant', `\n📝 Question ${interview.currentIndex + 2}/${interview.questions.length} (${nextQuestion.difficulty.toUpperCase()}) - ${nextQuestion.seconds}s:\n${nextQuestion.prompt}`);
+                        addMessage('assistant', `\n${getLocalizedText('question_prefix')} ${interview.currentIndex + 2}/${interview.questions.length} (${getLocalizedText(`difficulty.${nextQuestion.difficulty}`)}) - ${nextQuestion.seconds}s:\n${nextQuestion.prompt}`);
                         dispatch({ type: 'interview/timer_tick', payload: nextQuestion.seconds });
                     }, 2000);
                 } else {
@@ -580,7 +728,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
                             <MessageCircle className="h-4 w-4" />
                         </div>
                         <div className="flex-1">
-                            <h3 className="text-sm font-semibold text-foreground mb-2">Current Question</h3>
+                            <h3 className="text-sm font-semibold text-foreground mb-2">{getLocalizedText('current_question')}</h3>
                             <p className="text-sm text-foreground leading-relaxed">
                                 <span className="font-medium">{currentQuestion.prompt}</span>
                             </p>
@@ -736,6 +884,15 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
                                 <span className="hidden sm:inline">{isListening ? 'Stop' : 'Voice'}</span>
                             </Button>
                         )}
+                        <Button
+                            onClick={handleSkipQuestion}
+                            disabled={isLoading}
+                            variant="outline"
+                            className="gap-2 h-14 px-4 cursor-pointer"
+                        >
+                            <SkipForward className="h-4 w-4" />
+                            <span className="hidden sm:inline">Skip</span>
+                        </Button>
                         <Button onClick={handleSubmit} disabled={!input.trim() || isLoading} className="gap-2 h-14 px-6 cursor-pointer">
                             {isLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <ArrowRight className="h-5 w-5" />}
                             <span className="hidden sm:inline">Submit</span>
@@ -782,6 +939,19 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
                     isCompleted={true}
                 />
             )}
+
+            {/* Custom Cancel Dialog */}
+            <Dialog
+                isOpen={showCancelDialog}
+                onClose={handleCancelCancel}
+                title={getLocalizedText('cancel_interview_title')}
+                message={getLocalizedText('cancel_interview_message')}
+                confirmText={getLocalizedText('ok')}
+                cancelText={getLocalizedText('cancel')}
+                onConfirm={handleConfirmCancel}
+                onCancel={handleCancelCancel}
+                variant="destructive"
+            />
         </div>
     );
 }

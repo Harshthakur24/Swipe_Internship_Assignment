@@ -1,6 +1,24 @@
 import { Question } from "@/types";
 import type { Candidate } from "@/store";
 
+// Language-specific instructions for AI responses
+function getLanguageInstructions(language: string): string {
+  const languageMap: Record<string, string> = {
+    'en': 'IMPORTANT: Respond in English. All questions, feedback, and conversation should be in English.',
+    'es': 'IMPORTANT: Responde en español. Todas las preguntas, comentarios y conversación deben ser en español.',
+    'fr': 'IMPORTANT: Répondez en français. Toutes les questions, commentaires et conversations doivent être en français.',
+    'de': 'IMPORTANT: Antworten Sie auf Deutsch. Alle Fragen, Kommentare und Gespräche müssen auf Deutsch sein.',
+    'it': 'IMPORTANT: Rispondi in italiano. Tutte le domande, i commenti e le conversazioni devono essere in italiano.',
+    'pt': 'IMPORTANT: Responda em português. Todas as perguntas, comentários e conversas devem ser em português.',
+    'ru': 'IMPORTANT: Отвечайте на русском языке. Все вопросы, комментарии и разговоры должны быть на русском языке.',
+    'ja': 'IMPORTANT: 日本語で回答してください。すべての質問、フィードバック、会話は日本語で行ってください。',
+    'ko': 'IMPORTANT: 한국어로 응답해주세요. 모든 질문, 피드백, 대화는 한국어로 해주세요.',
+    'zh': 'IMPORTANT: 请用中文回答。所有问题、反馈和对话都应该用中文进行。'
+  };
+  
+  return languageMap[language] || languageMap['en'];
+}
+
 // Use the exact same Gemini API call structure that works in the chatbot with retry logic
 async function generateGeminiText(prompt: string, maxRetries = 3): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
@@ -57,7 +75,7 @@ export interface GeneratedInterview {
   questions: Question[];
 }
 
-export async function generateInterviewQuestions(): Promise<GeneratedInterview> {
+export async function generateInterviewQuestions(language: string = 'en'): Promise<GeneratedInterview> {
   try {
     // Check if API key is available
     if (!process.env.GEMINI_API_KEY) {
@@ -65,8 +83,12 @@ export async function generateInterviewQuestions(): Promise<GeneratedInterview> 
       return getDefaultQuestions();
     }
 
+    const languageInstructions = getLanguageInstructions(language);
+    
     const prompt = `
     Generate 6 interview questions for a full-stack developer position (React/Node.js focus).
+    ${languageInstructions}
+    
     Create exactly 6 questions with the following structure:
     - 2 Easy questions (basic concepts, 20 seconds each)
     - 2 Medium questions (practical implementation, 60 seconds each)  
@@ -179,10 +201,13 @@ function getDefaultQuestions(): GeneratedInterview {
   };
 }
 
-export async function evaluateAnswer(question: Question, answer: string): Promise<{ score: number; feedback: string }> {
+export async function evaluateAnswer(question: Question, answer: string, language: string = 'en'): Promise<{ score: number; feedback: string }> {
   try {
+    const languageInstructions = getLanguageInstructions(language);
+    
     const prompt = `
     You are an expert technical interviewer evaluating a candidate's answer for a full-stack developer position.
+    ${languageInstructions}
     
     Question: "${question.prompt}"
     Difficulty: ${question.difficulty}
@@ -306,15 +331,18 @@ export async function chatReply(message: string): Promise<string> {
   }
 }
 
-export async function handleInterviewFlow(message: string, candidate?: Candidate, conversationHistory: string[] = []): Promise<{ response: string; action?: string; data?: Record<string, unknown> }> {
+export async function handleInterviewFlow(message: string, candidate?: Candidate, conversationHistory: string[] = [], language: string = 'en'): Promise<{ response: string; action?: string; data?: Record<string, unknown> }> {
   try {
     // Filter out loading messages and system messages from history
     const cleanHistory = conversationHistory
       .filter(msg => !msg.includes('Thinking...') && !msg.includes('Evaluating your answer...'))
       .slice(-6); // Keep only last 6 messages to avoid token limits
 
+    const languageInstructions = getLanguageInstructions(language);
+    
     const prompt = `
     You are an AI interviewer conducting a full-stack developer interview. 
+    ${languageInstructions}
     
     Current candidate information: ${candidate ? JSON.stringify(candidate) : 'No candidate info yet'}
     Recent conversation history: ${cleanHistory.join('\n')}
