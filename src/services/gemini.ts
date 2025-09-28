@@ -1,7 +1,7 @@
 import { Question } from "@/types";
 import type { Candidate } from "@/store";
 
-// Unified Gemini text generation using REST API (v1beta) and gemini-2.0-flash
+// Use the exact same Gemini API call structure that works in the chatbot
 async function generateGeminiText(prompt: string): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('missing_key');
@@ -9,32 +9,24 @@ async function generateGeminiText(prompt: string): Promise<string> {
   const model = 'gemini-2.0-flash';
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent';
 
-  const res = await fetch(url + `?key=${encodeURIComponent(apiKey)}`, {
+  const response = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    },
     body: JSON.stringify({
-      contents: [
-        {
-          role: 'user',
-          parts: [{ text: prompt }]
-        }
-      ]
-    })
+      contents: [{ parts: [{ text: prompt }] }],
+    }),
   });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`gemini_http_${res.status}: ${text}`);
+  if (!response.ok) {
+    const errorData = await response.json();
+    throw new Error(`Gemini API error: ${response.status} - ${errorData.error.message}`);
   }
 
-  const data = await res.json();
-  // Try to read the text from typical response shapes
-  const candidates = data.candidates || [];
-  const first = candidates[0] || {};
-  const content = first.content || {};
-  const parts = content.parts || [];
-  const text = (parts[0] && (parts[0].text || parts[0].content || parts[0].stringValue)) || '';
-  return typeof text === 'string' ? text : '';
+  const data = await response.json();
+  return data.candidates[0].content.parts[0].text;
 }
 
 export interface GeneratedInterview {
@@ -366,17 +358,23 @@ export async function handleInterviewFlow(message: string, candidate?: Candidate
 export async function extractCandidateDetailsFromText(text: string): Promise<{ name: string; email: string; phone: string }> {
   try {
     const prompt = `
-    You are given raw resume text. Extract the candidate's full name, email, and phone number.
-    - Name should be a proper full name (e.g., "Jane Doe"), not a username
-    - If a field is not present, return an empty string for it
-    - Output strictly JSON with keys: name, email, phone
-
+    You are given resume text (either from PDF or DOCX). Extract the candidate's information with high accuracy.
+    
+    Instructions:
+    - Extract the FULL NAME (first name + last name, e.g., "John Smith")
+    - Extract the EMAIL ADDRESS (look for @ symbol)
+    - Extract the PHONE NUMBER (look for 10-digit numbers, with or without formatting)
+    - If any field is not found, return empty string for that field
+    - Be very careful with name extraction - look at the top of the resume
+    - For phone numbers, accept various formats: (123) 456-7890, 123-456-7890, 123.456.7890, etc.
+    
     Resume Text:
     """
     ${text}
     """
 
-    JSON only:
+    Output ONLY a JSON object with these exact keys: name, email, phone
+    Do not include any other text or explanations.
     {"name":"","email":"","phone":""}
     `;
 
