@@ -6,6 +6,7 @@ import { selectCurrentInterview } from '@/store';
 import ResumeUpload from '@/components/ResumeUpload';
 import InterviewChat from '@/components/InterviewChat';
 import InterviewerDashboard from '@/components/InterviewerDashboard';
+import FixedTimer from '@/components/FixedTimer';
 
 
 export default function Home() {
@@ -249,6 +250,24 @@ export default function Home() {
           )}
         </div>
       </div>
+
+      {/* Fixed Timer - Only show on chat page */}
+      {(interview.status !== 'not_started' || interview.candidate) && (
+        <FixedTimer
+          onPause={() => {
+            dispatch({ type: 'interview/pause' });
+          }}
+          onResume={() => {
+            dispatch({ type: 'interview/resume' });
+          }}
+          onCancel={() => {
+            const confirmed = window.confirm('Are you sure you want to cancel the current interview? Progress will be lost.');
+            if (confirmed) {
+              dispatch({ type: 'interview/reset' });
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

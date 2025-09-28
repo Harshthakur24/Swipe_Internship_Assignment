@@ -1,32 +1,56 @@
 import { Question } from "@/types";
 import type { Candidate } from "@/store";
 
-// Use the exact same Gemini API call structure that works in the chatbot
-async function generateGeminiText(prompt: string): Promise<string> {
+// Use the exact same Gemini API call structure that works in the chatbot with retry logic
+async function generateGeminiText(prompt: string, maxRetries = 3): Promise<string> {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   if (!apiKey) throw new Error('missing_key');
 
   const model = 'gemini-2.0-flash';
   const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent';
 
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-    }),
-  });
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+        }),
+      });
 
-  if (!response.ok) {
-    const errorData = await response.json();
-    throw new Error(`Gemini API error: ${response.status} - ${errorData.error.message}`);
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ error: { message: 'Unknown error' } }));
+        
+        // If it's a 503 (service unavailable) or 429 (rate limit), retry with backoff
+        if ((response.status === 503 || response.status === 429) && attempt < maxRetries) {
+          const delay = Math.pow(2, attempt) * 1000; // Exponential backoff: 2s, 4s, 8s
+          console.log(`Gemini API ${response.status}, retrying in ${delay}ms (attempt ${attempt}/${maxRetries})`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        
+        throw new Error(`Gemini API error: ${response.status} - ${errorData.error.message}`);
+      }
+
+      const data = await response.json();
+      return data.candidates[0].content.parts[0].text;
+    } catch (error) {
+      if (attempt === maxRetries) {
+        throw error;
+      }
+      
+      // For network errors, retry with backoff
+      const delay = Math.pow(2, attempt) * 1000;
+      console.log(`Gemini API error, retrying in ${delay}ms (attempt ${attempt}/${maxRetries}):`, error);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
-
-  const data = await response.json();
-  return data.candidates[0].content.parts[0].text;
+  
+  throw new Error('Max retries exceeded');
 }
 
 export interface GeneratedInterview {

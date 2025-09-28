@@ -3,18 +3,65 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { selectCurrentInterview, type Candidate, type Answer } from '@/store';
 import { generateInterviewQuestions, evaluateAnswer, handleInterviewFlow } from '@/services/gemini';
-import { MessageCircle, Clock, CheckCircle, ArrowRight, Loader2, XCircle } from 'lucide-react';
+import { MessageCircle, CheckCircle, ArrowRight, Loader2, Upload, Bot, User, Mic, MicOff } from 'lucide-react';
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Card } from "@/components/ui/card";
+import toast from 'react-hot-toast';
+import SentimentAnalysis from './SentimentAnalysis';
+import InterviewAnalytics from './InterviewAnalytics';
+import LanguageSelector from './LanguageSelector';
+import InterviewTemplateSelector from './InterviewTemplateSelector';
+
+// Type declarations for speech recognition
+interface SpeechRecognitionEvent extends Event {
+    resultIndex: number;
+    results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+    error: string;
+    message: string;
+}
+
+interface SpeechRecognition extends EventTarget {
+    continuous: boolean;
+    interimResults: boolean;
+    lang: string;
+    start(): void;
+    stop(): void;
+    onresult: ((event: SpeechRecognitionEvent) => void) | null;
+    onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+    onend: (() => void) | null;
+}
+
+declare global {
+    interface Window {
+        webkitSpeechRecognition: new () => SpeechRecognition;
+        SpeechRecognition: new () => SpeechRecognition;
+    }
+}
 
 interface InterviewChatProps {
     onStartInterview?: () => void;
+    onResume?: () => void;
+    onCancel?: () => void;
 }
 
-export default function InterviewChat({ onStartInterview }: InterviewChatProps) {
+export default function InterviewChat({ onStartInterview, onResume, onCancel }: InterviewChatProps) {
     const dispatch = useDispatch();
     const interview = useSelector(selectCurrentInterview);
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState<Array<{ role: 'user' | 'assistant'; text: string; timestamp: number; loading?: boolean }>>([]);
     const [isLoading, setIsLoading] = useState(false);
+    const [hasShown10SecondWarning, setHasShown10SecondWarning] = useState(false);
+
+    // New feature states
+    const [selectedLanguage, setSelectedLanguage] = useState('en');
+    const [showTemplateSelector, setShowTemplateSelector] = useState(false);
+    const [currentAnswer, setCurrentAnswer] = useState('');
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [isListening, setIsListening] = useState(false);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -47,6 +94,72 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
         return cleaned.slice(0, 180) + '…';
     }, []);
 
+
+    // Check if voice features are supported
+    const isVoiceSupported = typeof window !== 'undefined' &&
+        ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) &&
+        'speechSynthesis' in window;
+
+    // Voice recognition setup
+    const recognitionRef = useRef<SpeechRecognition | null>(null);
+
+    useEffect(() => {
+        if (isVoiceSupported && typeof window !== 'undefined' && 'webkitSpeechRecognition' in window) {
+            const SpeechRecognition = window.webkitSpeechRecognition;
+            recognitionRef.current = new SpeechRecognition();
+
+            if (recognitionRef.current) {
+                recognitionRef.current.continuous = true;
+                recognitionRef.current.interimResults = true;
+                recognitionRef.current.lang = 'en-US';
+
+                recognitionRef.current.onresult = (event: SpeechRecognitionEvent) => {
+                    let finalTranscript = '';
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        const transcript = event.results[i][0].transcript;
+                        if (event.results[i].isFinal) {
+                            finalTranscript += transcript;
+                        }
+                    }
+                    if (finalTranscript) {
+                        setInput(finalTranscript);
+                    }
+                };
+
+                recognitionRef.current.onerror = (event: SpeechRecognitionErrorEvent) => {
+                    console.error('Speech recognition error:', event.error);
+                    toast.error(`Voice recognition error: ${event.error}`);
+                    setIsListening(false);
+                };
+
+                recognitionRef.current.onend = () => {
+                    setIsListening(false);
+                };
+            }
+        }
+    }, [isVoiceSupported]);
+
+    const startListening = () => {
+        if (recognitionRef.current && !isListening) {
+            try {
+                recognitionRef.current.start();
+                setIsListening(true);
+                toast.success('Voice recognition started');
+            } catch (error) {
+                console.error('Error starting speech recognition:', error);
+                toast.error('Failed to start voice recognition');
+            }
+        }
+    };
+
+    const stopListening = () => {
+        if (recognitionRef.current && isListening) {
+            recognitionRef.current.stop();
+            setIsListening(false);
+            toast.success('Voice recognition stopped');
+        }
+    };
+
     useEffect(() => {
         scrollToBottom();
     }, [messages, scrollToBottom]);
@@ -72,6 +185,7 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
         if (!interview.candidate) return;
 
         setIsLoading(true);
+        setHasShown10SecondWarning(false); // Reset warning state for new interview
         addMessage('assistant', 'Generating personalized interview questions...', true);
 
         try {
@@ -100,56 +214,46 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
 
         setIsLoading(true);
         addMessage('user', userMessage);
-        addMessage('assistant', 'Thinking...', true);
+        addMessage('assistant', 'Generating personalized interview questions...', true);
 
         try {
-            // Get current messages at the time of the call to avoid stale closure
-            setMessages(currentMessages => {
-                const conversationHistory = currentMessages.map(m => `${m.role}: ${m.text}`).slice(-10);
+            // Get current messages directly to avoid stale closure issues
+            const currentMessages = messages;
+            const conversationHistory = currentMessages.map(m => `${m.role}: ${m.text}`).slice(-10);
 
-                // Process the flow asynchronously
-                handleInterviewFlow(userMessage, interview.candidate, conversationHistory)
-                    .then(result => {
-                        updateLastMessage(result.response, false);
+            // Process the flow asynchronously
+            const result = await handleInterviewFlow(userMessage, interview.candidate, conversationHistory);
 
-                        if (result.action === 'start_interview') {
-                            setTimeout(() => {
-                                startInterview();
-                            }, 1500);
-                        } else if (result.action === 'info_received') {
-                            // Extract info from user message and update candidate
-                            const updates: Partial<Candidate> = {};
-                            const lowerMessage = userMessage.toLowerCase();
+            updateLastMessage(result.response, false);
 
-                            if (lowerMessage.includes('@') && !interview.candidate?.email) {
-                                updates.email = userMessage;
-                            } else if (lowerMessage.match(/\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/) && !interview.candidate?.phone) {
-                                updates.phone = userMessage;
-                            } else if (!interview.candidate?.name || interview.candidate.name === 'Unknown Candidate') {
-                                updates.name = userMessage;
-                            }
+            if (result.action === 'start_interview') {
+                setTimeout(() => {
+                    startInterview();
+                }, 1500);
+            } else if (result.action === 'info_received') {
+                // Extract info from user message and update candidate
+                const updates: Partial<Candidate> = {};
+                const lowerMessage = userMessage.toLowerCase();
 
-                            if (Object.keys(updates).length > 0) {
-                                dispatch({ type: 'interview/collect_info', payload: updates });
-                            }
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error with Gemini flow:', error);
-                        updateLastMessage('I apologize, I encountered an error. Please try again.', false);
-                    })
-                    .finally(() => {
-                        setIsLoading(false);
-                    });
+                if (lowerMessage.includes('@') && !interview.candidate?.email) {
+                    updates.email = userMessage;
+                } else if (lowerMessage.match(/\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/) && !interview.candidate?.phone) {
+                    updates.phone = userMessage;
+                } else if (!interview.candidate?.name || interview.candidate.name === 'Unknown Candidate') {
+                    updates.name = userMessage;
+                }
 
-                return currentMessages;
-            });
+                if (Object.keys(updates).length > 0) {
+                    dispatch({ type: 'interview/collect_info', payload: updates });
+                }
+            }
         } catch (error) {
             console.error('Error with Gemini flow:', error);
             updateLastMessage('I apologize, I encountered an error. Please try again.', false);
+        } finally {
             setIsLoading(false);
         }
-    }, [interview.candidate, dispatch, addMessage, updateLastMessage, startInterview]);
+    }, [interview.candidate, dispatch, addMessage, updateLastMessage, startInterview, messages]);
 
     const initializeChat = useCallback(() => {
         if (interview.status === 'collecting_info' && messages.length === 0 && !initializedRef.current) {
@@ -182,21 +286,9 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
         initializedRef.current = false;
 
         dispatch({ type: 'interview/reset' });
-    }, [dispatch]);
+        onCancel?.();
+    }, [dispatch, onCancel]);
 
-    const pauseInterview = useCallback(() => {
-        if (timerRef.current) {
-            clearInterval(timerRef.current);
-            timerRef.current = null;
-        }
-        dispatch({ type: 'interview/pause' });
-        addMessage('assistant', '⏸️ Interview paused. You can resume anytime.');
-    }, [dispatch, addMessage]);
-
-    const resumeInterview = useCallback(() => {
-        dispatch({ type: 'interview/resume' });
-        addMessage('assistant', '▶️ Resuming interview.');
-    }, [dispatch, addMessage]);
 
     const restartInterview = useCallback(async () => {
         const existingCandidate = interview.candidate;
@@ -328,7 +420,33 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
             // Auto-submit when time runs out
             handleAutoSubmit();
         }
-    }, [interview.timeRemaining, interview.status, handleAutoSubmit]);
+
+        // Show toast notifications for time warnings
+        if (interview.status === 'in_progress' && typeof interview.timeRemaining === 'number') {
+            if (interview.timeRemaining === 10 && !hasShown10SecondWarning) {
+                toast('⏰ 10 seconds left!', {
+                    duration: 3000,
+                    style: {
+                        background: '#fbbf24',
+                        color: '#000',
+                        fontWeight: 'bold',
+                    },
+                });
+                setHasShown10SecondWarning(true);
+            }
+
+            if (interview.timeRemaining === 5) {
+                toast('🚨 5 seconds left!', {
+                    duration: 2000,
+                    style: {
+                        background: '#ef4444',
+                        color: '#fff',
+                        fontWeight: 'bold',
+                    },
+                });
+            }
+        }
+    }, [interview.timeRemaining, interview.status, handleAutoSubmit, hasShown10SecondWarning]);
 
     const handleSubmit = async () => {
         if (!input.trim() || isLoading) return;
@@ -340,7 +458,9 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
             const currentQuestion = interview.questions[interview.currentIndex];
 
             addMessage('user', userInput);
+            setCurrentAnswer(userInput); // Track current answer for analysis
             setIsLoading(true);
+            setIsAnalyzing(true);
             addMessage('assistant', 'Evaluating your answer...', true);
 
             try {
@@ -368,6 +488,7 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
                 updateLastMessage('I encountered an error evaluating your answer. Please try again.', false);
             } finally {
                 setIsLoading(false);
+                setIsAnalyzing(false);
             }
         } else {
             await handleGeminiFlow(userInput);
@@ -376,27 +497,46 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
 
     // Old handleInfoSubmit removed - now handled by Gemini flow
 
-    const formatTime = (seconds: number) => {
-        const mins = Math.floor(seconds / 60);
-        const secs = seconds % 60;
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
-    };
 
     const currentQuestion = interview.questions[interview.currentIndex];
 
     return (
-        <div className="space-y-3">
-            {/* Add Resume Button - Always Visible (Top/Sticky) */}
-            <div className="sticky top-0 z-40 pt-1 pb-2 bg-gradient-to-b from-white/90 to-transparent backdrop-blur supports-[backdrop-filter]:backdrop-blur">
-                <div className="flex justify-end">
-                    <button
-                        onClick={handleAddResumeClick}
-                        className="flex items-center gap-2 px-4 py-2 border border-slate-300 rounded-xl text-slate-800 hover:bg-white bg-white/95 shadow-sm hover:shadow transition-all duration-200 text-sm font-bold"
-                        title="Upload new resume"
-                    >
-                        <span className="text-base">📄</span>
-                        <span>Add New Resume</span>
-                    </button>
+        <div className="space-y-4">
+            {/* Add top padding when timer is visible to prevent content overlap */}
+            {interview.status === 'in_progress' && typeof interview.timeRemaining === "number" && (
+                <div className="h-20"></div>
+            )}
+            {/* Sticky action bar */}
+            <div className="sticky top-0 z-30 bg-background/80 backdrop-blur supports-[backdrop-filter]:backdrop-blur py-2">
+                <div className="flex justify-between items-center">
+                    <div className="flex items-center gap-3">
+                        <LanguageSelector
+                            selectedLanguage={selectedLanguage}
+                            onLanguageChange={setSelectedLanguage}
+                        />
+                        {interview.status === 'collecting_info' && (
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setShowTemplateSelector(!showTemplateSelector)}
+                                className="gap-2"
+                            >
+                                <Bot className="h-4 w-4" />
+                                <span>Choose Template</span>
+                            </Button>
+                        )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <Button
+                            variant="outline"
+                            onClick={handleAddResumeClick}
+                            className="gap-2 bg-transparent"
+                            aria-label="Upload new resume"
+                        >
+                            <Upload className="h-4 w-4" />
+                            <span>Add New Resume</span>
+                        </Button>
+                    </div>
                 </div>
             </div>
             {/* Hidden input to handle resume uploads globally */}
@@ -408,189 +548,239 @@ export default function InterviewChat({ onStartInterview }: InterviewChatProps) 
                 className="hidden"
             />
 
-            {/* Interview Status */}
-            {interview.status === 'in_progress' && (
-                <div className="bg-white/95 backdrop-blur-md border border-slate-200/60 rounded-xl p-3 shadow-lg">
-                    <div className="flex items-center justify-between mb-2">
-                        <div className="flex items-center gap-2">
-                            <div className="p-1.5 bg-gradient-to-br from-slate-800 to-slate-900 rounded-md">
-                                <MessageCircle className="w-3 h-3 text-white" />
-                            </div>
-                            <div>
-                                <h3 className="text-sm font-semibold text-slate-900">Interview in Progress</h3>
-                                <p className="text-xs text-slate-600">Question {interview.currentIndex + 1} of {interview.questions.length}</p>
-                                {currentQuestion && (
-                                    <p className="text-xs text-slate-900 mt-0.5 max-w-xl truncate"><span className="font-bold">{currentQuestion.prompt}</span></p>
-                                )}
-                            </div>
-                        </div>
-                        <div className="flex items-center gap-2">
-                            {interview.timeRemaining && (
-                                <div className="flex items-center gap-1 px-2 py-1 bg-red-100 rounded-md">
-                                    <Clock className="w-3 h-3 text-red-600" />
-                                    <span className="text-xs text-red-700 font-semibold">{formatTime(interview.timeRemaining)}</span>
-                                </div>
-                            )}
-                            {!interview.paused ? (
-                                <button
-                                    onClick={pauseInterview}
-                                    className="flex items-center gap-1 px-2 py-1 border border-slate-300 rounded-md text-slate-700 hover:bg-slate-50 transition-colors"
-                                    title="Pause interview"
-                                >
-                                    <span className="text-xs font-semibold">Pause</span>
-                                </button>
-                            ) : (
-                                <button
-                                    onClick={resumeInterview}
-                                    className="flex items-center gap-1 px-2 py-1 border border-slate-300 rounded-md text-slate-700 hover:bg-slate-50 transition-colors"
-                                    title="Resume interview"
-                                >
-                                    <span className="text-xs font-semibold">Resume</span>
-                                </button>
-                            )}
-                            <button
-                                onClick={cancelInterview}
-                                className="flex items-center gap-1 px-2 py-1 border border-slate-300 rounded-md text-slate-700 hover:bg-slate-50 transition-colors"
-                                title="Cancel current interview"
-                            >
-                                <XCircle className="w-3 h-3" />
-                                <span className="text-xs font-semibold">Cancel</span>
-                            </button>
-                        </div>
-                    </div>
-                    <div className="w-full bg-slate-200 rounded-full h-1">
-                        <div
-                            className="bg-gradient-to-r from-slate-800 to-slate-900 h-1 rounded-full transition-all duration-1000"
-                            style={{ width: `${((interview.currentIndex) / interview.questions.length) * 100}%` }}
-                        ></div>
-                    </div>
-                </div>
+            {/* Template Selector */}
+            {showTemplateSelector && (
+                <InterviewTemplateSelector
+                    onTemplateSelect={(template) => {
+                        setShowTemplateSelector(false);
+                        // TODO: Apply template to interview
+                        toast.success(`Selected ${template.name} template`);
+                    }}
+                    userSkills={['JavaScript', 'React', 'Node.js']}
+                    experienceLevel="mid"
+                />
             )}
 
-            {/* Welcome Back Modal */}
-            {interview.paused && interview.status === 'in_progress' && (
-                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
-                    <div className="bg-white rounded-xl p-4 w-full max-w-sm shadow-xl border border-slate-200">
-                        <h4 className="text-lg font-semibold text-slate-900 mb-2">Welcome back!</h4>
-                        <p className="text-sm text-slate-600 mb-3">You paused your interview. Would you like to resume where you left off?</p>
-                        <div className="flex justify-end gap-2">
-                            <button onClick={cancelInterview} className="px-3 py-1.5 border border-slate-300 rounded-md text-slate-700 hover:bg-slate-50 text-sm">Cancel Interview</button>
-                            <button onClick={resumeInterview} className="px-3 py-1.5 bg-slate-900 text-white rounded-md hover:opacity-90 text-sm">Resume</button>
+
+
+            {/* Sentiment Analysis */}
+            {interview.status === 'in_progress' && (
+                <SentimentAnalysis
+                    currentAnswer={currentAnswer}
+                    isAnalyzing={isAnalyzing}
+                />
+            )}
+
+
+            {/* Current Question - Always visible during interview */}
+            {interview.status === 'in_progress' && currentQuestion && (
+                <Card className="border border-border rounded-xl p-4 bg-card">
+                    <div className="flex items-start gap-3">
+                        <div className="p-2 rounded-md bg-primary text-primary-foreground">
+                            <MessageCircle className="h-4 w-4" />
+                        </div>
+                        <div className="flex-1">
+                            <h3 className="text-sm font-semibold text-foreground mb-2">Current Question</h3>
+                            <p className="text-sm text-foreground leading-relaxed">
+                                <span className="font-medium">{currentQuestion.prompt}</span>
+                            </p>
                         </div>
                     </div>
+                    <div className="mt-3 h-1.5 w-full rounded-full bg-muted">
+                        <div
+                            className="h-1.5 rounded-full bg-primary transition-all"
+                            style={{ width: `${(interview.currentIndex / interview.questions.length) * 100}%` }}
+                        />
+                    </div>
+                </Card>
+            )}
+
+            {/* Paused modal */}
+            {interview.paused && interview.status === 'in_progress' && (
+                <div className="fixed inset-0 z-40 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
+                    <Card className="w-full max-w-sm p-4 border border-border bg-card">
+                        <h4 className="text-base font-semibold text-foreground mb-2">Welcome back</h4>
+                        <p className="text-sm text-muted-foreground mb-4">
+                            You paused your interview. Would you like to resume where you left off?
+                        </p>
+                        <div className="flex justify-end gap-2">
+                            <Button variant="outline" size="sm" onClick={cancelInterview} className="cursor-pointer">
+                                Cancel Interview
+                            </Button>
+                            <Button size="sm" onClick={() => {
+                                dispatch({ type: 'interview/resume' });
+                                addMessage('assistant', '▶️ Resuming interview.');
+                                onResume?.();
+                            }} className="cursor-pointer">
+                                Resume
+                            </Button>
+                        </div>
+                    </Card>
                 </div>
             )}
 
             {/* Messages */}
-            <div className="space-y-2 mb-4 max-h-80 overflow-auto pr-2 scrollbar-thin scrollbar-thumb-slate-300 scrollbar-track-transparent">
-                {messages.map((m, i) => (
-                    <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'} animate-in fade-in slide-in-from-bottom-2 duration-500`}>
-                        <div className={`relative group ${m.role === 'user'
-                            ? 'bg-gradient-to-br from-slate-800 via-slate-700 to-slate-800 text-white shadow-xl shadow-slate-900/20'
-                            : 'bg-white/95 backdrop-blur-sm text-slate-800 border border-slate-200/60 shadow-lg shadow-slate-900/5'
-                            } rounded-2xl px-4 py-3 max-w-[85%] transition-all duration-300 hover:shadow-xl hover:shadow-slate-900/10`}>
-                            {m.role === 'assistant' && (
-                                <div className="absolute -left-2 top-3 w-6 h-6 bg-gradient-to-br from-slate-800 to-slate-700 rounded-full flex items-center justify-center shadow-lg border-2 border-white">
-                                    <MessageCircle className="w-3 h-3 text-white" />
+            <Card className="border border-border rounded-xl p-3 bg-card">
+                <div className="max-h-96 overflow-auto pr-1">
+                    <div className="space-y-3">
+                        {messages.map((m, i) => (
+                            <div key={i} className={`flex items-start gap-3 ${m.role === "user" ? "flex-row-reverse" : "flex-row"}`}>
+                                {/* Profile Icon */}
+                                <div className={`flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center ${m.role === "user"
+                                    ? "bg-primary text-primary-foreground"
+                                    : "bg-muted text-muted-foreground"
+                                    }`}>
+                                    {m.role === "user" ? (
+                                        <User className="h-4 w-4" />
+                                    ) : (
+                                        <Bot className="h-4 w-4" />
+                                    )}
                                 </div>
-                            )}
-                            {m.loading ? (
-                                <div className="flex items-center gap-2">
-                                    <Loader2 className="w-3 h-3 animate-spin text-slate-600" />
-                                    <span className="text-slate-600 text-xs font-medium">{m.text}</span>
-                                </div>
-                            ) : (
-                                <div>
-                                    <p className="leading-relaxed text-sm font-medium">{m.text}</p>
-                                    {/* Quick action buttons for specific messages */}
-                                    {m.role === 'assistant' && m.text.includes('Ready to begin?') && (
-                                        <div className="mt-2 flex gap-2">
-                                            <button
-                                                onClick={() => handleGeminiFlow('Start interview process')}
-                                                className="px-3 py-1.5 bg-gradient-to-r from-slate-800 to-slate-700 text-white rounded-lg font-semibold hover:scale-105 transition-all duration-300 shadow-lg text-sm"
-                                            >
-                                                🚀 Start Interview
-                                            </button>
+
+                                {/* Message Content */}
+                                <div
+                                    className={[
+                                        "rounded-2xl px-4 py-3 max-w-[85%] transition-all",
+                                        m.role === "user"
+                                            ? "bg-primary text-primary-foreground"
+                                            : "bg-background border border-border text-foreground",
+                                    ].join(" ")}
+                                >
+                                    {m.loading ? (
+                                        <div className="flex items-center gap-2 text-muted-foreground">
+                                            <Loader2 className="h-3 w-3 animate-spin" />
+                                            <span className="text-xs">{m.text}</span>
+                                        </div>
+                                    ) : (
+                                        <div>
+                                            <p className="text-sm leading-relaxed">{m.text}</p>
+                                            {/* Quick action buttons for specific messages */}
+                                            {m.role === 'assistant' && m.text.includes('Ready to begin?') && (
+                                                <div className="mt-2 flex gap-2">
+                                                    <Button
+                                                        onClick={() => handleGeminiFlow('Start interview process')}
+                                                        size="sm"
+                                                        className="gap-1"
+                                                    >
+                                                        🚀 Start Interview
+                                                    </Button>
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                 </div>
-                            )}
-                        </div>
+                            </div>
+                        ))}
+                        <div ref={messagesEndRef} />
                     </div>
-                ))}
-                <div ref={messagesEndRef} />
-            </div>
+                </div>
+            </Card>
 
-            {/* Input */}
+            {/* Inputs */}
             {interview.status === 'collecting_info' && (
-                <div className="relative">
-                    <div className="flex gap-2 p-2 bg-white/90 backdrop-blur-md rounded-2xl border border-slate-200/60 shadow-xl shadow-slate-900/10">
-                        <input
-                            type="text"
+                <div className="flex items-center gap-2">
+                    <div className="flex-1 flex items-center gap-3 rounded-2xl border border-border bg-card p-4">
+                        <Input
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
+                            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
                             placeholder="Please provide the requested information..."
-                            className="flex-1 p-2 bg-transparent text-slate-900 placeholder-slate-500 focus:outline-none transition-all duration-200 text-sm font-medium"
+                            className="bg-transparent text-base py-4 h-14 min-h-[3.5rem]"
+                            aria-label="Interview info input"
                         />
-                        <button
-                            onClick={handleSubmit}
-                            disabled={!input.trim() || isLoading}
-                            className="group relative px-3 py-2 bg-gradient-to-br from-slate-800 via-slate-700 to-slate-900 text-white rounded-xl font-semibold transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-slate-900/20 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:scale-100 flex items-center gap-1"
-                        >
-                            {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle className="w-3 h-3" />}
-                            <span className="hidden sm:inline text-sm">Submit</span>
-                        </button>
+                        {isVoiceSupported && (
+                            <Button
+                                onClick={isListening ? stopListening : startListening}
+                                variant={isListening ? "destructive" : "outline"}
+                                size="sm"
+                                className="gap-2 h-14 px-4 cursor-pointer"
+                            >
+                                {isListening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                                <span className="hidden sm:inline">{isListening ? 'Stop' : 'Voice'}</span>
+                            </Button>
+                        )}
+                        <Button onClick={handleSubmit} disabled={!input.trim() || isLoading} className="gap-2 h-14 px-6 cursor-pointer">
+                            {isLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <CheckCircle className="h-5 w-5" />}
+                            <span className="hidden sm:inline">Submit</span>
+                        </Button>
                     </div>
+                    {/* Voice indicator */}
+                    {isListening && (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground mt-2">
+                            <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                            <span>Listening... Speak your response</span>
+                        </div>
+                    )}
                 </div>
             )}
 
             {interview.status === 'in_progress' && (
-                <div className="relative">
-                    <div className="flex gap-2 p-2 bg-white/90 backdrop-blur-md rounded-2xl border border-slate-200/60 shadow-xl shadow-slate-900/10">
-                        <input
-                            type="text"
+                <div className="flex items-center gap-2">
+                    <div className="flex-1 flex items-center gap-3 rounded-2xl border border-border bg-card p-4">
+                        <Input
                             value={input}
                             onChange={(e) => setInput(e.target.value)}
-                            onKeyDown={(e) => e.key === 'Enter' && handleSubmit()}
+                            onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
                             placeholder="Type your answer here..."
-                            className="flex-1 p-2 bg-transparent text-slate-900 placeholder-slate-500 focus:outline-none transition-all duration-200 text-sm font-medium"
+                            className="bg-transparent text-base py-4 h-14 min-h-[3.5rem]"
+                            aria-label="Answer input"
                         />
-                        <button
-                            onClick={handleSubmit}
-                            disabled={isLoading || !input.trim()}
-                            className="group relative px-3 py-2 bg-gradient-to-br from-slate-800 via-slate-700 to-slate-900 text-white rounded-xl font-semibold transition-all duration-300 hover:scale-105 hover:shadow-xl hover:shadow-slate-900/20 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:scale-100 flex items-center gap-1"
-                        >
-                            {isLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <ArrowRight className="w-3 h-3 transition-transform group-hover:translate-x-1" />}
-                            <span className="hidden sm:inline text-sm">Submit</span>
-                        </button>
+                        {isVoiceSupported && (
+                            <Button
+                                onClick={isListening ? stopListening : startListening}
+                                variant={isListening ? "destructive" : "outline"}
+                                size="sm"
+                                className="gap-2 h-14 px-4 cursor-pointer"
+                            >
+                                {isListening ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                                <span className="hidden sm:inline">{isListening ? 'Stop' : 'Voice'}</span>
+                            </Button>
+                        )}
+                        <Button onClick={handleSubmit} disabled={!input.trim() || isLoading} className="gap-2 h-14 px-6 cursor-pointer">
+                            {isLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : <ArrowRight className="h-5 w-5" />}
+                            <span className="hidden sm:inline">Submit</span>
+                        </Button>
                     </div>
+                    {/* Voice indicator */}
+                    {isListening && (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground mt-2">
+                            <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                            <span>Listening... Speak your answer</span>
+                        </div>
+                    )}
                 </div>
             )}
 
             {interview.status === 'completed' && (
-                <div className="bg-gradient-to-br from-green-50 to-emerald-50 border border-green-200 rounded-2xl p-4 text-center">
-                    <div className="inline-flex p-3 bg-gradient-to-br from-green-500 to-emerald-600 text-white rounded-xl mb-3">
-                        <CheckCircle className="w-6 h-6" />
+                <Card className="border border-border rounded-2xl p-5 bg-card text-center">
+                    <div className="inline-flex items-center justify-center rounded-xl bg-primary text-primary-foreground p-3 mb-3">
+                        <CheckCircle className="h-6 w-6" />
                     </div>
-                    <h3 className="text-lg font-bold text-slate-900 mb-2">Interview Completed!</h3>
-                    <p className="text-sm text-slate-600 mb-3">Your interview has been successfully completed and saved.</p>
+                    <h3 className="text-lg font-bold text-foreground mb-2">Interview Completed</h3>
+                    <p className="text-sm text-muted-foreground mb-4">
+                        Your interview has been successfully completed and saved.
+                    </p>
                     <div className="flex items-center justify-center gap-2">
-                        <button
+                        <Button
                             onClick={restartInterview}
-                            className="px-4 py-2 bg-gradient-to-br from-slate-800 to-slate-900 text-white rounded-lg font-semibold hover:scale-105 transition-all duration-300 text-sm"
+                            className="cursor-pointer"
                         >
                             Start New Interview
-                        </button>
-                        <button
-                            onClick={handleAddResumeClick}
-                            className="px-4 py-2 border border-slate-300 text-slate-800 rounded-lg font-semibold hover:bg-white transition-all duration-300 text-sm"
-                        >
+                        </Button>
+                        <Button variant="outline" onClick={handleAddResumeClick} className="cursor-pointer">
                             Add New Resume
-                        </button>
+                        </Button>
                     </div>
                     <input ref={fileInputRef} onChange={handleResumeSelected} type="file" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="hidden" />
-                </div>
+                </Card>
+            )}
+
+            {/* Interview Analytics */}
+            {interview.status === 'completed' && (
+                <InterviewAnalytics
+                    interviewData={interview}
+                    isCompleted={true}
+                />
             )}
         </div>
     );
