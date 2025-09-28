@@ -65,13 +65,8 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
     const [isListening, setIsListening] = useState(false);
     const [showCancelDialog, setShowCancelDialog] = useState(false);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
-    const messagesEndRef = useRef<HTMLDivElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const initializedRef = useRef(false);
-
-    const scrollToBottom = useCallback(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, []);
 
     const addMessage = useCallback((role: 'user' | 'assistant', text: string, loading = false) => {
         setMessages(prev => [...prev, { role, text, timestamp: Date.now(), loading }]);
@@ -268,9 +263,6 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
         }
     };
 
-    useEffect(() => {
-        scrollToBottom();
-    }, [messages, scrollToBottom]);
 
     useEffect(() => {
         if (interview.status === 'in_progress' && !interview.paused && interview.timeRemaining && interview.timeRemaining > 0) {
@@ -667,7 +659,7 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
                                 variant="outline"
                                 size="sm"
                                 onClick={() => setShowTemplateSelector(!showTemplateSelector)}
-                                className="gap-2"
+                                className="gap-2 items-center justify-center"
                             >
                                 <Bot className="h-4 w-4" />
                                 <span>Choose Template</span>
@@ -819,7 +811,6 @@ export default function InterviewChat({ onStartInterview, onResume, onCancel }: 
                                 </div>
                             </div>
                         ))}
-                        <div ref={messagesEndRef} />
                     </div>
                 </div>
             </Card>
