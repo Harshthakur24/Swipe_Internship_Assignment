@@ -1,21 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import mammoth from "mammoth";
+import { extractCandidateDetailsFromText } from "@/services/gemini";
 
 export const runtime = "nodejs";
 
 async function extractTextFromPdf(buffer: Buffer): Promise<string> {
   try {
-    // For PDF files, we'll implement a basic text extraction
-    // Since PDF parsing is complex, we'll return a structured placeholder
-    // that will trigger the chatbot to collect information manually
     console.log("PDF file received, size:", buffer.length);
     
-    // Return a minimal text that won't match our parsing patterns
-    // This will ensure the chatbot collects the information properly
-    return "Resume uploaded - PDF format detected. Please provide your details below.";
+    // For now, return a placeholder that will trigger AI extraction
+    // This ensures the system works while we handle PDF parsing
+    return "PDF resume uploaded - please extract candidate information";
   } catch (error) {
     console.error("PDF processing error:", error);
-    return "Error processing PDF file. Please provide your information manually.";
+    return "";
   }
 }
 
@@ -25,33 +23,71 @@ async function extractTextFromDocx(arrayBuffer: ArrayBuffer): Promise<string> {
 }
 
 function parseCandidateFromText(text: string) {
-  // Improved parsing with multiple patterns
-  const lines = text.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  console.log("Parsing text of length:", text.length);
+  
+  // Clean and normalize text
+  const cleanText = text.replace(/\s+/g, ' ').trim();
+  const lines = cleanText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
+  
+  let name = "";
+  let email = "";
+  let phone = "";
   
   // Look for name in first few lines (common resume formats)
-  let name = "";
-  for (let i = 0; i < Math.min(5, lines.length); i++) {
+  for (let i = 0; i < Math.min(8, lines.length); i++) {
     const line = lines[i];
-    // Pattern for names: FirstName LastName or FirstName MiddleName LastName
-    const nameMatch = line.match(/^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})$/);
-    if (nameMatch && line.length > 3 && line.length < 50) {
-      name = nameMatch[1];
+    // More flexible name patterns
+    const namePatterns = [
+      /^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})$/,
+      /^([A-Z][a-z]+\s+[A-Z][a-z]+)$/,
+      /^([A-Z][a-z]+)$/
+    ];
+    
+    for (const pattern of namePatterns) {
+      const nameMatch = line.match(pattern);
+      if (nameMatch && line.length > 2 && line.length < 50 && !line.includes('@') && !line.includes('http')) {
+        name = nameMatch[1];
+        break;
+      }
+    }
+    if (name) break;
+  }
+  
+  // Look for email anywhere in the text (more comprehensive pattern)
+  const emailPatterns = [
+    /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g,
+    /[A-Za-z0-9._%+-]+\s*@\s*[A-Za-z0-9.-]+\s*\.\s*[A-Za-z]{2,}/g
+  ];
+  
+  for (const pattern of emailPatterns) {
+    const matches = text.match(pattern);
+    if (matches && matches.length > 0) {
+      email = matches[0].replace(/\s+/g, '');
       break;
     }
   }
   
-  // Look for email anywhere in the text
-  const emailMatch = text.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
-  
   // Look for phone numbers with various formats
-  const phoneMatch = text.match(/(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/);
+  const phonePatterns = [
+    /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g,
+    /(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g,
+    /\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/g
+  ];
   
-  // If we found a name, email, or phone, return them; otherwise return empty strings
-  // This will trigger the chatbot to collect missing information
+  for (const pattern of phonePatterns) {
+    const matches = text.match(pattern);
+    if (matches && matches.length > 0) {
+      phone = matches[0].replace(/\s+/g, ' ');
+      break;
+    }
+  }
+  
+  console.log("Extracted:", { name, email, phone });
+  
   return {
     name: name || "",
-    email: emailMatch?.[0] || "",
-    phone: phoneMatch?.[0]?.replace(/\s+/g, " ") || "",
+    email: email || "",
+    phone: phone || "",
   };
 }
 
@@ -82,7 +118,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Unsupported file type" }, { status: 400 });
     }
 
-    const { name, email, phone } = parseCandidateFromText(text);
+    let { name, email, phone } = parseCandidateFromText(text);
+
+    // For PDFs or when basic parsing fails, always try AI extraction
+    if (isPdf || !name || !email || !phone) {
+      try {
+        console.log("Using AI extraction for PDF or incomplete parsing...");
+        const aiExtracted = await extractCandidateDetailsFromText(text);
+        if (aiExtracted.name) name = name || aiExtracted.name;
+        if (aiExtracted.email) email = email || aiExtracted.email;
+        if (aiExtracted.phone) phone = phone || aiExtracted.phone;
+        console.log("AI extraction result:", { name, email, phone });
+      } catch (aiError) {
+        console.error("AI extraction failed:", aiError);
+      }
+    }
 
     // Determine which fields are missing
     const missingFields = [];

@@ -1,7 +1,18 @@
 "use client";
 import { combineReducers, configureStore } from "@reduxjs/toolkit";
 import { persistReducer, persistStore, FLUSH, REHYDRATE, PAUSE, PERSIST, PURGE, REGISTER } from "redux-persist";
-import storage from 'redux-persist/lib/storage';
+import createWebStorage from 'redux-persist/lib/storage/createWebStorage';
+
+// Safe storage for SSR/Edge environments to avoid "redux-persist failed to create sync storage" warning
+const createNoopStorage = () => ({
+  getItem: async () => null,
+  setItem: async (_: string, value: string) => value,
+  removeItem: async () => undefined,
+});
+
+const storage = typeof window !== 'undefined'
+  ? createWebStorage('local')
+  : (createNoopStorage() as unknown as Storage);
 
 export type Difficulty = "easy" | "medium" | "hard";
 
@@ -51,6 +62,7 @@ export interface InterviewState {
   completedAt?: number;
   summary?: InterviewSummary;
   timeRemaining?: number;
+  paused?: boolean;
 }
 
 type CandidatesState = {
@@ -68,6 +80,7 @@ const initialInterviewState: InterviewStateType = {
     answers: [],
     currentIndex: 0,
     status: "not_started",
+    paused: false,
   }
 };
 
@@ -84,7 +97,9 @@ type InterviewAction =
   | { type: "interview/reset" }
   | { type: "interview/update_status"; payload: InterviewStatus }
   | { type: "interview/timer_tick"; payload: number }
-  | { type: "interview/collect_info"; payload: Partial<Candidate> };
+  | { type: "interview/collect_info"; payload: Partial<Candidate> }
+  | { type: "interview/pause" }
+  | { type: "interview/resume" };
 
 function candidatesReducer(
   state: CandidatesState = initialCandidatesState,
@@ -168,6 +183,21 @@ function interviewReducer(
       };
     case "interview/reset":
       return initialInterviewState;
+    case "interview/pause":
+      return {
+        current: {
+          ...state.current,
+          paused: true,
+          lastTickAt: Date.now(),
+        }
+      };
+    case "interview/resume":
+      return {
+        current: {
+          ...state.current,
+          paused: false,
+        }
+      };
     case "interview/update_status":
       return {
         current: {

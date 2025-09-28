@@ -1,11 +1,12 @@
 'use client'
 import React, { useState } from 'react';
-import { useSelector } from 'react-redux';
+import { useSelector, useDispatch } from 'react-redux';
 import { selectCandidates, type Candidate } from '@/store';
-import { Users, Search, Star, Calendar, Phone, Mail, Eye, ArrowLeft } from 'lucide-react';
+import { Users, Search, Star, Calendar, Phone, Mail, Eye, ArrowLeft, Trash2 } from 'lucide-react';
 
 export default function InterviewerDashboard() {
     const candidates = useSelector(selectCandidates);
+    const dispatch = useDispatch();
     const [selectedCandidate, setSelectedCandidate] = useState<Candidate | null>(null);
     const [searchTerm, setSearchTerm] = useState('');
     const [sortBy, setSortBy] = useState<'score' | 'name' | 'date'>('score');
@@ -38,6 +39,13 @@ export default function InterviewerDashboard() {
         if (score >= 45) return 'Excellent';
         if (score >= 30) return 'Good';
         return 'Needs Improvement';
+    };
+
+    const clearAllCandidates = () => {
+        const confirmed = window.confirm('Are you sure you want to clear all candidates? This action cannot be undone.');
+        if (confirmed) {
+            dispatch({ type: 'candidates/set', payload: [] });
+        }
     };
 
     if (selectedCandidate) {
@@ -127,9 +135,21 @@ export default function InterviewerDashboard() {
                     <h2 className="text-3xl font-bold text-slate-900 mb-2">Interview Dashboard</h2>
                     <p className="text-slate-600">Review candidate performance and interview results</p>
                 </div>
-                <div className="flex items-center gap-3 px-4 py-2 bg-slate-100 rounded-lg">
-                    <Users className="w-5 h-5 text-slate-600" />
-                    <span className="font-semibold text-slate-900">{candidates.length} Candidates</span>
+                <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 px-4 py-2 bg-slate-100 rounded-lg">
+                        <Users className="w-5 h-5 text-slate-600" />
+                        <span className="font-semibold text-slate-900">{candidates.length} Candidates</span>
+                    </div>
+                    {candidates.length > 0 && (
+                        <button
+                            onClick={clearAllCandidates}
+                            className="flex items-center gap-2 px-3 py-2 bg-red-100 text-red-700 rounded-lg hover:bg-red-200 transition-colors"
+                            title="Clear all candidates"
+                        >
+                            <Trash2 className="w-4 h-4" />
+                            <span className="text-sm font-medium">Clear All</span>
+                        </button>
+                    )}
                 </div>
             </div>
 

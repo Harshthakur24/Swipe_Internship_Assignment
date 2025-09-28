@@ -1,10 +1,41 @@
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Question } from "@/types";
 import type { Candidate } from "@/store";
 
-// Initialize Gemini AI
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+// Unified Gemini text generation using REST API (v1beta) and gemini-2.0-flash
+async function generateGeminiText(prompt: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) throw new Error('missing_key');
+
+  const model = 'gemini-2.0-flash';
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent';
+
+  const res = await fetch(url + `?key=${encodeURIComponent(apiKey)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: prompt }]
+        }
+      ]
+    })
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`gemini_http_${res.status}: ${text}`);
+  }
+
+  const data = await res.json();
+  // Try to read the text from typical response shapes
+  const candidates = data.candidates || [];
+  const first = candidates[0] || {};
+  const content = first.content || {};
+  const parts = content.parts || [];
+  const text = (parts[0] && (parts[0].text || parts[0].content || parts[0].stringValue)) || '';
+  return typeof text === 'string' ? text : '';
+}
 
 export interface GeneratedInterview {
   questions: Question[];
@@ -12,6 +43,12 @@ export interface GeneratedInterview {
 
 export async function generateInterviewQuestions(): Promise<GeneratedInterview> {
   try {
+    // Check if API key is available
+    if (!process.env.GEMINI_API_KEY) {
+      console.warn('GEMINI_API_KEY not found, using default questions');
+      return getDefaultQuestions();
+    }
+
     const prompt = `
     Generate 6 interview questions for a full-stack developer position (React/Node.js focus).
     Create exactly 6 questions with the following structure:
@@ -65,9 +102,7 @@ export async function generateInterviewQuestions(): Promise<GeneratedInterview> 
     Make questions practical and relevant to real-world development scenarios.
     `;
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+    const text = await generateGeminiText(prompt);
     
     // Parse the JSON response
     const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -159,17 +194,16 @@ export async function evaluateAnswer(question: Question, answer: string): Promis
     Be encouraging but honest. Provide specific, actionable feedback.
     `;
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+    const text = await generateGeminiText(prompt);
     
     // Parse the JSON response
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       const parsed = JSON.parse(jsonMatch[0]);
+      const score = Math.max(1, Math.min(10, parsed.score || 5));
       return {
-        score: Math.max(1, Math.min(10, parsed.score || 5)),
-        feedback: parsed.feedback || "Good attempt. Consider providing more technical detail."
+        score: score,
+        feedback: parsed.feedback || getScoreBasedFeedback(score)
       };
     }
     
@@ -192,25 +226,41 @@ function getFallbackEvaluation(question: Question, answer: string): { score: num
   if (question.difficulty === 'easy') {
     if (answer.length > 50) score = Math.min(10, score + 2);
     if (answer.toLowerCase().includes('react') || answer.toLowerCase().includes('javascript')) score = Math.min(10, score + 1);
-    feedback = score >= 8 ? 'Great answer! You demonstrated good understanding of the basics.' : 
-               score >= 6 ? 'Good answer. Consider providing more specific examples.' :
-               'Please provide more detail in your response.';
   } else if (question.difficulty === 'medium') {
     if (answer.length > 100) score = Math.min(10, score + 1);
     if (answer.toLowerCase().includes('component') || answer.toLowerCase().includes('async')) score = Math.min(10, score + 2);
-    feedback = score >= 8 ? 'Excellent technical depth and practical knowledge shown.' :
-               score >= 6 ? 'Good answer with some technical insight. Could use more examples.' :
-               'Consider providing more technical detail and real-world examples.';
   } else { // hard
     if (answer.length > 200) score = Math.min(10, score + 1);
     if (answer.toLowerCase().includes('architecture') || answer.toLowerCase().includes('scalable')) score = Math.min(10, score + 2);
     if (answer.toLowerCase().includes('optimization') || answer.toLowerCase().includes('performance')) score = Math.min(10, score + 1);
-    feedback = score >= 8 ? 'Outstanding architectural thinking and deep technical knowledge.' :
-               score >= 6 ? 'Good high-level thinking. Consider diving deeper into implementation details.' :
-               'This is a complex question. Consider breaking it down into components and providing more technical depth.';
   }
   
+  // Generate feedback based on actual score
+  feedback = getScoreBasedFeedback(score);
+  
   return { score, feedback };
+}
+
+function getScoreBasedFeedback(score: number): string {
+  if (score >= 9) {
+    return `Outstanding! (${score}/10) Exceptional answer demonstrating deep understanding and practical expertise.`;
+  } else if (score >= 8) {
+    return `Excellent! (${score}/10) Great technical depth and clear communication.`;
+  } else if (score >= 7) {
+    return `Very good! (${score}/10) Solid understanding with good technical insight.`;
+  } else if (score >= 6) {
+    return `Good answer! (${score}/10) Shows understanding but could use more detail.`;
+  } else if (score >= 5) {
+    return `Fair attempt (${score}/10). Consider providing more specific examples and technical details.`;
+  } else if (score >= 4) {
+    return `Needs improvement (${score}/10). The answer lacks depth and technical accuracy.`;
+  } else if (score >= 3) {
+    return `Below expectations (${score}/10). Please provide more comprehensive and accurate information.`;
+  } else if (score >= 2) {
+    return `Poor answer (${score}/10). Significant gaps in understanding and technical knowledge.`;
+  } else {
+    return `Very poor (${score}/10). The answer shows minimal understanding of the topic.`;
+  }
 }
 
 export async function chatReply(message: string): Promise<string> {
@@ -229,9 +279,8 @@ export async function chatReply(message: string): Promise<string> {
     Keep your response concise (2-3 sentences) and actionable.
     `;
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    return response.text();
+    const text = await generateGeminiText(prompt);
+    return text;
   } catch (error) {
     console.error('Error with Gemini chat:', error);
     // Fallback response
@@ -243,15 +292,22 @@ export async function chatReply(message: string): Promise<string> {
 
 export async function handleInterviewFlow(message: string, candidate?: Candidate, conversationHistory: string[] = []): Promise<{ response: string; action?: string; data?: Record<string, unknown> }> {
   try {
+    // Filter out loading messages and system messages from history
+    const cleanHistory = conversationHistory
+      .filter(msg => !msg.includes('Thinking...') && !msg.includes('Evaluating your answer...'))
+      .slice(-6); // Keep only last 6 messages to avoid token limits
+
     const prompt = `
     You are an AI interviewer conducting a full-stack developer interview. 
     
     Current candidate information: ${candidate ? JSON.stringify(candidate) : 'No candidate info yet'}
-    Conversation history: ${conversationHistory.join('\n')}
+    Recent conversation history: ${cleanHistory.join('\n')}
     
     User message: "${message}"
     
     Based on the conversation, determine what to do next:
+    
+    IMPORTANT: Do not repeat previous messages. Be concise and move the conversation forward.
     
     If this is the start and candidate info is missing, respond with:
     - "collecting_info" action
@@ -280,9 +336,7 @@ export async function handleInterviewFlow(message: string, candidate?: Candidate
     Be conversational, friendly, and professional. Guide the user through the process smoothly.
     `;
 
-    const result = await model.generateContent(prompt);
-    const response = await result.response;
-    const text = response.text();
+    const text = await generateGeminiText(prompt);
     
     // Parse the JSON response
     const jsonMatch = text.match(/\{[\s\S]*\}/);
@@ -305,6 +359,41 @@ export async function handleInterviewFlow(message: string, candidate?: Candidate
       response: "I'm here to help with your interview! Let's get started by collecting some basic information.",
       action: "collecting_info"
     };
+  }
+}
+
+
+export async function extractCandidateDetailsFromText(text: string): Promise<{ name: string; email: string; phone: string }> {
+  try {
+    const prompt = `
+    You are given raw resume text. Extract the candidate's full name, email, and phone number.
+    - Name should be a proper full name (e.g., "Jane Doe"), not a username
+    - If a field is not present, return an empty string for it
+    - Output strictly JSON with keys: name, email, phone
+
+    Resume Text:
+    """
+    ${text}
+    """
+
+    JSON only:
+    {"name":"","email":"","phone":""}
+    `;
+
+    const raw = await generateGeminiText(prompt);
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return {
+        name: typeof parsed.name === 'string' ? parsed.name.trim() : '',
+        email: typeof parsed.email === 'string' ? parsed.email.trim() : '',
+        phone: typeof parsed.phone === 'string' ? parsed.phone.trim() : '',
+      };
+    }
+    return { name: '', email: '', phone: '' };
+  } catch (err) {
+    console.error('AI extraction failed:', err);
+    return { name: '', email: '', phone: '' };
   }
 }
 
